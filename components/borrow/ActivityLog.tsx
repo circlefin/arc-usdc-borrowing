@@ -24,7 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Trash2 } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
 import { JsonHighlight } from "./JsonHighlight";
-import { useActivityLog, clearLog, type LogEntry } from "@/lib/activityLog";
+import { useActivityLog, clearLog, retryPersistence, retryFailedEntries, type LogEntry } from "@/lib/activityLog";
 import { useActivityLogSync } from "@/lib/useActivityLogSync";
 import { summarizeEntry, type ActivityStatus, type ActivityChip } from "@/lib/activitySummary";
 import { cn } from "@/lib/utils";
@@ -58,6 +58,7 @@ function EntryRow({ entry }: { entry: LogEntry }) {
   const [showRaw, setShowRaw] = useState(false);
   const summary = summarizeEntry(entry.label, entry.data);
   const label = entry.label.replace(/\s*—\s*error$/, "");
+  const unsaved = entry.persistence === "failed";
 
   return (
     <div className="rounded-md border border-border p-2.5">
@@ -69,10 +70,31 @@ function EntryRow({ entry }: { entry: LogEntry }) {
           />
           <p className="truncate text-xs font-medium">{label}</p>
         </div>
-        <p className="shrink-0 text-xs text-muted-foreground tabular-nums">
-          {new Date(entry.timestamp).toLocaleTimeString()}
-        </p>
+        <div className="flex shrink-0 items-center gap-2">
+          {entry.persistence === "pending" && (
+            <span className="text-[11px] text-muted-foreground">Saving…</span>
+          )}
+          {unsaved && <span className="text-[11px] text-destructive">Not saved</span>}
+          <p className="shrink-0 text-xs text-muted-foreground tabular-nums">
+            {new Date(entry.timestamp).toLocaleTimeString()}
+          </p>
+        </div>
       </div>
+
+      {unsaved && (
+        <div className="mt-1.5 pl-4">
+          <button
+            type="button"
+            onClick={() => retryPersistence(entry.id)}
+            className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+          >
+            Retry saving this call
+          </button>
+          {entry.persistenceError && (
+            <p className="mt-1 text-[11px] text-muted-foreground break-all">{entry.persistenceError}</p>
+          )}
+        </div>
+      )}
 
       {summary.headline && <p className="mt-1 pl-4 text-xs text-muted-foreground">{summary.headline}</p>}
 
@@ -107,6 +129,7 @@ function EntryRow({ entry }: { entry: LogEntry }) {
 export function ActivityLog() {
   useActivityLogSync();
   const entries = useActivityLog();
+  const unsavedCount = entries.filter((entry) => entry.persistence === "failed").length;
 
   return (
     <Card className="gap-3">
@@ -133,6 +156,21 @@ export function ActivityLog() {
         </CardAction>
       </CardHeader>
       <CardContent>
+        {unsavedCount > 0 && (
+          <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/5 p-2.5">
+            <p className="text-xs text-destructive">
+              {unsavedCount} call{unsavedCount === 1 ? "" : "s"} failed to save to your account and
+              will be lost when this page reloads.
+            </p>
+            <button
+              type="button"
+              onClick={retryFailedEntries}
+              className="mt-1 text-[11px] text-destructive underline underline-offset-2"
+            >
+              Retry saving
+            </button>
+          </div>
+        )}
         {entries.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             Raw Borrow Kit responses will show up here as you use the app.
