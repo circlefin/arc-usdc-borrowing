@@ -21,11 +21,16 @@
 import { useSyncExternalStore } from "react";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 
+/** Whether the entry reached the user's durable activity log in Supabase. */
+export type PersistenceState = "pending" | "saved" | "failed";
+
 export interface LogEntry {
   id: number;
   timestamp: number;
   label: string;
   data: unknown;
+  persistence: PersistenceState;
+  persistenceError?: string;
 }
 
 let entries: LogEntry[] = [];
@@ -36,18 +41,60 @@ function emit() {
   for (const listener of listeners) listener();
 }
 
+function updateEntry(id: number, patch: Partial<LogEntry>) {
+  entries = entries.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
+  emit();
+}
+
 /** Appends a Borrow Kit call's raw response (or error) to the activity log panel. */
 export function logEvent(label: string, data?: unknown) {
-  entries = [...entries, { id: nextId++, timestamp: Date.now(), label, data }].slice(-50);
+  const entry: LogEntry = {
+    id: nextId++,
+    timestamp: Date.now(),
+    label,
+    data,
+    persistence: "pending",
+  };
+  entries = [...entries, entry].slice(-50);
   emit();
 
-  // Fire-and-forget persistence; RLS scopes this to the signed-in user.
-  void getSupabaseBrowserClient()
-    .from("activity_log")
-    .insert({ label, data })
-    .then(({ error }) => {
-      if (error) console.error("[activityLog] persist failed", error);
+  // Fire-and-forget persistence; RLS scopes this to the signed-in user. The
+  // outcome is tracked per entry so a failed write shows up in the panel and
+  // can be retried, instead of only reaching the browser console.
+  void persistEntry(entry);
+}
+
+async function persistEntry(entry: LogEntry) {
+  try {
+    const { error } = await getSupabaseBrowserClient()
+      .from("activity_log")
+      .insert({ label: entry.label, data: entry.data });
+    if (error) throw error;
+    updateEntry(entry.id, { persistence: "saved", persistenceError: undefined });
+  } catch (err) {
+    console.error("[activityLog] persist failed", err);
+    updateEntry(entry.id, {
+      persistence: "failed",
+      persistenceError: err instanceof Error ? err.message : String(err),
     });
+  }
+}
+
+/** Retries persisting a single entry whose write failed. */
+export function retryPersistence(id: number) {
+  const entry = entries.find((candidate) => candidate.id === id);
+  if (!entry || entry.persistence !== "failed") return;
+  updateEntry(entry.id, { persistence: "pending", persistenceError: undefined });
+  void persistEntry(entry);
+}
+
+/** Retries persisting every entry whose write failed. */
+export function retryFailedEntries() {
+  for (const entry of entries) {
+    if (entry.persistence !== "failed") continue;
+    updateEntry(entry.id, { persistence: "pending", persistenceError: undefined });
+    void persistEntry(entry);
+  }
 }
 
 /** Replaces the in-memory log with rows fetched from Supabase (newest-first input, stored oldest-first). */
@@ -56,7 +103,13 @@ export function hydrateFromRemote(
 ) {
   entries = [...rows]
     .reverse()
-    .map((r) => ({ id: r.id, timestamp: new Date(r.created_at).getTime(), label: r.label, data: r.data }));
+    .map((r) => ({
+      id: r.id,
+      timestamp: new Date(r.created_at).getTime(),
+      label: r.label,
+      data: r.data,
+      persistence: "saved",
+    }));
   nextId = rows.reduce((max, r) => Math.max(max, r.id + 1), nextId);
   emit();
 }
